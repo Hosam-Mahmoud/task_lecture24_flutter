@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:sqflite/sqflite.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
-import 'cubit/task_cubit.dart';
 
 void main() {
   runApp(const MyApp());
@@ -19,133 +18,149 @@ class _MyAppState extends State<MyApp> {
   int _currentIndex = 0;
 
   @override
+  void initState() {
+    createDatabase();
+    super.initState();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: BlocProvider(
-        create: (context) => TaskCubit()..initDatabase(),
-        child: Scaffold(
-          appBar: AppBar(
-            title: const Text('To-Do List'),
-          ),
-          body: Builder(
-            builder: (context) {
-              return [
-                TaskListScreen(status: 'new'),
-                TaskListScreen(status: 'done'),
-                TaskListScreen(status: 'archived'),
-              ][_currentIndex];
-            },
-          ),
-          bottomNavigationBar: BottomNavigationBar(
-            currentIndex: _currentIndex,
-            onTap: (index) {
-              setState(() {
-                _currentIndex = index;
-              });
-            },
-            items: const [
-              BottomNavigationBarItem(
-                icon: Icon(Icons.task),
-                label: 'New Task',
-              ),
-              BottomNavigationBarItem(
-                icon: Icon(Icons.circle),
-                label: 'Done Tasks',
-              ),
-              BottomNavigationBarItem(
-                icon: Icon(Icons.archive_sharp),
-                label: 'Archived Tasks',
-              ),
-            ],
-          ),
+      home: Scaffold(
+        appBar: AppBar(
+          title: const Text('To-Do List'),
+        ),
+        body: [
+          TaskListScreen(status: 'new', onTaskUpdated: () => setState(() {})),
+          TaskListScreen(status: 'done', onTaskUpdated: () => setState(() {})),
+          TaskListScreen(status: 'archived', onTaskUpdated: () => setState(() {})),
+        ][_currentIndex],
+        bottomNavigationBar: BottomNavigationBar(
+          currentIndex: _currentIndex,
+          onTap: (index) {
+            setState(() {
+              _currentIndex = index;
+            });
+          },
+          items: const [
+            BottomNavigationBarItem(icon: Icon(Icons.task), label: 'New Task'),
+            BottomNavigationBarItem(icon: Icon(Icons.circle), label: 'Done Tasks'),
+            BottomNavigationBarItem(icon: Icon(Icons.archive_sharp), label: 'Archived Tasks'),
+          ],
         ),
       ),
     );
   }
 }
 
-class TaskListScreen extends StatelessWidget {
+class TaskListScreen extends StatefulWidget {
   final String status;
+  final VoidCallback onTaskUpdated;
 
-  const TaskListScreen({super.key, required this.status});
+  const TaskListScreen({super.key, required this.status, required this.onTaskUpdated});
+
+  @override
+  State<TaskListScreen> createState() => _TaskListScreenState();
+}
+
+class _TaskListScreenState extends State<TaskListScreen> {
+  Future<List<Map<String, dynamic>>> getData() async {
+    if (database == null) {
+      await createDatabase();
+    }
+    return await database!.rawQuery("SELECT * FROM tasks WHERE status = ?", [widget.status]);
+  }
+
+  Future<void> deleteTask(int id) async {
+    await database!.rawDelete("DELETE FROM tasks WHERE id = ?", [id]).then((value) {
+      print("$value raw deleted");
+      widget.onTaskUpdated(); // تحديث الشاشة بعد الحذف
+    });
+  }
+
+  Future<void> updateTaskStatus(int id, String status) async {
+    await database!.rawUpdate(
+      "UPDATE tasks SET status = ? WHERE id = ?",
+      [status, id],
+    ).then((value) {
+      print("$value status updated");
+      widget.onTaskUpdated(); // تحديث الشاشة بعد تغيير الحالة
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        BlocBuilder<TaskCubit, TaskState>(
-          builder: (context, state) {
-            if (state is TaskLoading) {
+        FutureBuilder<List<Map<String, dynamic>>>(
+          future: getData(),
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
               return const Center(child: CircularProgressIndicator());
             }
-            if (state is TaskError) {
+            if (snapshot.hasError) {
               return const Center(child: Text('Error loading tasks'));
             }
-            if (state is TaskLoaded && state.tasks.isEmpty) {
+            if (!snapshot.hasData || snapshot.data!.isEmpty) {
               return const Center(child: Text('No tasks available'));
             }
-            if (state is TaskLoaded) {
-              final tasks = state.tasks.where((task) => task['status'] == status).toList();
-              return ListView.builder(
-                itemCount: tasks.length,
-                itemBuilder: (context, index) {
-                  final task = tasks[index];
-                  return ListTile(
-                    leading: task['image_path'] != null
-                        ? Image.file(
-                            File(task['image_path']),
-                            width: 50,
-                            height: 50,
-                            fit: BoxFit.cover,
-                            errorBuilder: (context, error, stackTrace) => const Icon(Icons.image_not_supported),
-                          )
-                        : const Icon(Icons.image_not_supported),
-                    title: Text(task['title']),
-                    subtitle: Text('${task['date']} ${task['time']}'),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Checkbox(
-                          value: task['status'] == 'done',
-                          onChanged: (value) {
-                            context.read<TaskCubit>().updateTaskStatus(
-                                  task['id'],
-                                  value == true ? 'done' : 'new',
-                                );
-                          },
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.edit, color: Colors.blue),
-                          onPressed: () {
-                            showModalBottomSheet(
-                              context: context,
-                              isScrollControlled: true,
-                              builder: (bottomSheetContext) {
-                                return AddTaskBottomSheet(
-                                  task: task,
-                                  parentContext: context,
-                                );
-                              },
-                            );
-                          },
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.delete, color: Colors.red),
-                          onPressed: () {
-                            context.read<TaskCubit>().deleteTask(task['id']);
-                          },
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              );
-            }
-            return const Center(child: Text('No tasks available'));
+
+            final tasks = snapshot.data!;
+            return ListView.builder(
+              itemCount: tasks.length,
+              itemBuilder: (context, index) {
+                final task = tasks[index];
+                return ListTile(
+                  leading: task['image_path'] != null
+                      ? Image.file(
+                          File(task['image_path']),
+                          width: 50,
+                          height: 50,
+                          fit: BoxFit.cover,
+                          errorBuilder: (context, error, stackTrace) => const Icon(Icons.image_not_supported),
+                        )
+                      : const Icon(Icons.image_not_supported),
+                  title: Text(task['title']),
+                  subtitle: Text('${task['date']} ${task['time']}'),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Checkbox(
+                        value: task['status'] == 'done',
+                        onChanged: (value) {
+                          updateTaskStatus(task['id'], value == true ? 'done' : 'new');
+                        },
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.edit, color: Colors.blue),
+                        onPressed: () {
+                          showModalBottomSheet(
+                            context: context,
+                            isScrollControlled: true,
+                            builder: (context) {
+                              return AddTaskBottomSheet(
+                                onTaskAdded: widget.onTaskUpdated,
+                                task: task,
+                              );
+                            },
+                          );
+                        },
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete, color: Colors.red),
+                        onPressed: () {
+                          deleteTask(task['id']);
+                        },
+                      ),
+                    ],
+                  ),
+                );
+              },
+            );
           },
         ),
-        if (status == 'new')
+        if (widget.status == 'new')
           Align(
             alignment: Alignment.bottomRight,
             child: Padding(
@@ -156,9 +171,9 @@ class TaskListScreen extends StatelessWidget {
                   showModalBottomSheet(
                     context: context,
                     isScrollControlled: true,
-                    builder: (bottomSheetContext) {
+                    builder: (context) {
                       return AddTaskBottomSheet(
-                        parentContext: context,
+                        onTaskAdded: widget.onTaskUpdated,
                       );
                     },
                   );
@@ -172,14 +187,10 @@ class TaskListScreen extends StatelessWidget {
 }
 
 class AddTaskBottomSheet extends StatefulWidget {
+  final VoidCallback? onTaskAdded;
   final Map<String, dynamic>? task;
-  final BuildContext parentContext;
 
-  const AddTaskBottomSheet({
-    super.key,
-    this.task,
-    required this.parentContext,
-  });
+  const AddTaskBottomSheet({super.key, this.onTaskAdded, this.task});
 
   @override
   State<AddTaskBottomSheet> createState() => _AddTaskBottomSheetState();
@@ -258,22 +269,23 @@ class _AddTaskBottomSheetState extends State<AddTaskBottomSheet> {
   void _saveTask() {
     if (_titleController.text.isNotEmpty && _selectedDate != null && _selectedTime != null) {
       if (_taskId == null) {
-        widget.parentContext.read<TaskCubit>().insertTask(
-              title: _titleController.text,
-              date: "${_selectedDate!.day}-${_selectedDate!.month}-${_selectedDate!.year}",
-              time: _selectedTime!.format(context),
-              imagePath: _selectedImage?.path,
-            );
+        insertIntoMyDatabase(
+          title: _titleController.text,
+          date: "${_selectedDate!.day}-${_selectedDate!.month}-${_selectedDate!.year}",
+          time: _selectedTime!.format(context),
+          imagePath: _selectedImage?.path,
+        );
       } else {
-        widget.parentContext.read<TaskCubit>().updateTask(
-              id: _taskId!,
-              title: _titleController.text,
-              date: "${_selectedDate!.day}-${_selectedDate!.month}-${_selectedDate!.year}",
-              time: _selectedTime!.format(context),
-              imagePath: _selectedImage?.path,
-              status: widget.task!['status'],
-            );
+        updateTask(
+          id: _taskId!,
+          title: _titleController.text,
+          date: "${_selectedDate!.day}-${_selectedDate!.month}-${_selectedDate!.year}",
+          time: _selectedTime!.format(context),
+          imagePath: _selectedImage?.path,
+          status: widget.task!['status'],
+        );
       }
+      widget.onTaskAdded?.call();
       Navigator.pop(context);
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -347,4 +359,54 @@ class _AddTaskBottomSheetState extends State<AddTaskBottomSheet> {
       ),
     );
   }
+}
+
+Database? database;
+
+Future<void> createDatabase() async {
+  database = await openDatabase(
+    'todo2.db',
+    version: 1,
+    onCreate: (Database db, int version) {
+      db.execute(
+        "CREATE TABLE tasks (id INTEGER PRIMARY KEY, title TEXT, date TEXT, time TEXT, status TEXT, image_path TEXT)",
+      ).then((_) {
+        print('created table');
+      });
+    },
+    onOpen: (Database db) {
+      print('database opened');
+    },
+  );
+}
+
+Future<void> insertIntoMyDatabase({
+  required String title,
+  required String date,
+  required String time,
+  String status = 'new',
+  String? imagePath,
+}) async {
+  await database!.rawInsert(
+    "INSERT INTO tasks(title, date, time, status, image_path) VALUES(?, ?, ?, ?, ?)",
+    [title, date, time, status, imagePath],
+  ).then((value) {
+    print("$value raw inserted");
+  });
+}
+
+Future<void> updateTask({
+  required int id,
+  required String title,
+  required String date,
+  required String time,
+  required String status,
+  String? imagePath,
+}) async {
+  await database!.rawUpdate(
+    "UPDATE tasks SET title = ?, date = ?, time = ?, status = ?, image_path = ? WHERE id = ?",
+    [title, date, time, status, imagePath, id],
+  ).then((value) {
+    print("$value raw updated");
+  });
 }
